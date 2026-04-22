@@ -1,0 +1,17 @@
+{
+  "server": {
+    "host": "192.168.1.90",
+    "port": 10002
+  },
+  "veeder_root": {
+    "connection": "serial",
+    "serial_port": "/dev/ttyUSB0",
+    "baud_rate": 9600,
+    "parity": "odd",
+    "data_bits": 7,
+    "stop_bits": 1,
+    "host": "192.168.1.91",
+    "port": 10003
+  },
+  "idle_timeout_seconds": 30
+}

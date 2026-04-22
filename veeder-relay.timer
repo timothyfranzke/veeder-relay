@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Veeder Root Relay hourly
+
+[Timer]
+OnBootSec=1min
+OnCalendar=*:00
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

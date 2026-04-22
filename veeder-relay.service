@@ -1,0 +1,9 @@
+[Unit]
+Description=Veeder Root Relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/veeder-relay/relay.py
+TimeoutStartSec=120

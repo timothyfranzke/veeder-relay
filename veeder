@@ -1,0 +1,421 @@
+#!/usr/bin/env python3
+"""
+Veeder Relay CLI — manage the relay from the command line.
+
+Usage:
+    veeder status          Health check and last run info
+    veeder logs            Recent log entries (last 20)
+    veeder logs --errors   Only error/warning entries
+    veeder logs -n 50      Show last 50 entries
+    veeder config          Show current configuration
+    veeder config edit     Interactive config editor
+    veeder test            Run integration tests
+    veeder run             Trigger a relay run now
+"""
+
+import json
+import os
+import subprocess
+import sys
+
+CONFIG_PATH = "/etc/veeder-relay/config.json"
+RELAY_SCRIPT = "/opt/veeder-relay/relay.py"
+INTEGRATION_TEST = "/opt/veeder-relay/integration_test.py"
+SERVICE_NAME = "veeder-relay"
+TIMER_NAME = "veeder-relay.timer"
+
+
+# ---------------------------------------------------------------------------
+# Colors
+# ---------------------------------------------------------------------------
+
+def green(text):
+    return f"\033[32m{text}\033[0m"
+
+def red(text):
+    return f"\033[31m{text}\033[0m"
+
+def yellow(text):
+    return f"\033[33m{text}\033[0m"
+
+def bold(text):
+    return f"\033[1m{text}\033[0m"
+
+def dim(text):
+    return f"\033[2m{text}\033[0m"
+
+
+# ---------------------------------------------------------------------------
+# Status
+# ---------------------------------------------------------------------------
+
+def cmd_status():
+    print(bold("=== Veeder Relay Status ===\n"))
+
+    # Timer status
+    timer_out = subprocess.run(
+        ["systemctl", "is-enabled", TIMER_NAME],
+        capture_output=True, text=True
+    )
+    timer_enabled = timer_out.stdout.strip() == "enabled"
+
+    timer_active = subprocess.run(
+        ["systemctl", "is-active", TIMER_NAME],
+        capture_output=True, text=True
+    )
+    timer_running = timer_active.stdout.strip() == "active"
+
+    if timer_enabled and timer_running:
+        print(f"  Timer:       {green('enabled and active')}")
+    elif timer_enabled:
+        print(f"  Timer:       {yellow('enabled but not active')}")
+    else:
+        print(f"  Timer:       {red('disabled')}")
+
+    # Next run
+    timers_out = subprocess.run(
+        ["systemctl", "list-timers", TIMER_NAME, "--no-pager"],
+        capture_output=True, text=True
+    )
+    for line in timers_out.stdout.strip().split("\n"):
+        if SERVICE_NAME in line:
+            parts = line.split()
+            # systemctl list-timers format varies, find the NEXT field
+            next_time = " ".join(parts[:3]) if len(parts) > 3 else "unknown"
+            print(f"  Next run:    {next_time}")
+            break
+
+    # Last run result
+    last_run = subprocess.run(
+        ["systemctl", "show", f"{SERVICE_NAME}.service",
+         "--property=ExecMainStatus,ExecMainStartTimestamp,ActiveState,Result"],
+        capture_output=True, text=True
+    )
+    props = {}
+    for line in last_run.stdout.strip().split("\n"):
+        if "=" in line:
+            key, val = line.split("=", 1)
+            props[key] = val
+
+    last_time = props.get("ExecMainStartTimestamp", "never")
+    exit_code = props.get("ExecMainStatus", "unknown")
+    result = props.get("Result", "unknown")
+
+    if last_time and last_time != "n/a":
+        print(f"  Last run:    {last_time}")
+    else:
+        print(f"  Last run:    {dim('never')}")
+
+    if result == "success":
+        print(f"  Last result: {green('success')}")
+    elif exit_code == "0":
+        print(f"  Last result: {green('success')} (exit 0)")
+    elif last_time == "n/a":
+        print(f"  Last result: {dim('no runs yet')}")
+    else:
+        print(f"  Last result: {red(f'failed')} (exit {exit_code})")
+
+    # Config
+    print()
+    if os.path.isfile(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH) as f:
+                cfg = json.load(f)
+            srv = cfg.get("server", {})
+            vr = cfg.get("veeder_root", {})
+            print(f"  Server:      {srv.get('host', '?')}:{srv.get('port', '?')}")
+            if vr.get("connection") == "tcp":
+                print(f"  Veeder Root: TCP {vr.get('host', '?')}:{vr.get('port', '?')}")
+            else:
+                print(f"  Veeder Root: Serial {vr.get('serial_port', '?')} @ {vr.get('baud_rate', '?')} baud")
+            print(f"  Timeout:     {cfg.get('idle_timeout_seconds', 30)}s")
+        except Exception as e:
+            print(f"  Config:      {red(f'error reading: {e}')}")
+    else:
+        print(f"  Config:      {red('not found')}")
+
+    # Serial port check (if serial mode)
+    if os.path.isfile(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH) as f:
+                cfg = json.load(f)
+            vr = cfg.get("veeder_root", {})
+            if vr.get("connection", "serial") == "serial":
+                port = vr.get("serial_port", "/dev/ttyUSB0")
+                if os.path.exists(port):
+                    if os.access(port, os.R_OK | os.W_OK):
+                        print(f"  Serial port: {green('OK')} ({port})")
+                    else:
+                        print(f"  Serial port: {red('permission denied')} ({port})")
+                else:
+                    print(f"  Serial port: {red('not found')} ({port})")
+        except Exception:
+            pass
+
+    # Firewall
+    fw = subprocess.run(["ufw", "status"], capture_output=True, text=True)
+    if "Status: active" in fw.stdout:
+        print(f"  Firewall:    {green('active')}")
+    else:
+        print(f"  Firewall:    {yellow('inactive')}")
+
+    # Recent errors
+    print()
+    errors = subprocess.run(
+        ["journalctl", "-u", SERVICE_NAME, "--no-pager", "-p", "err", "-n", "5",
+         "--output=short-precise"],
+        capture_output=True, text=True
+    )
+    error_lines = [l for l in errors.stdout.strip().split("\n") if l.strip() and "-- No entries --" not in l and "-- Journal begins" not in l]
+    if error_lines:
+        print(f"  {red('Recent errors:')}")
+        for line in error_lines:
+            print(f"    {line}")
+    else:
+        print(f"  {green('No recent errors')}")
+
+    print()
+
+
+# ---------------------------------------------------------------------------
+# Logs
+# ---------------------------------------------------------------------------
+
+def cmd_logs(args):
+    count = "20"
+    errors_only = False
+
+    i = 0
+    while i < len(args):
+        if args[i] == "--errors" or args[i] == "-e":
+            errors_only = True
+        elif args[i] == "-n" and i + 1 < len(args):
+            count = args[i + 1]
+            i += 1
+        i += 1
+
+    cmd = ["journalctl", "-u", SERVICE_NAME, "--no-pager", "-n", count, "--output=short-precise"]
+    if errors_only:
+        cmd += ["-p", "warning"]
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    output = result.stdout.strip()
+
+    if not output or "-- No entries --" in output:
+        print(dim("No log entries found."))
+        return
+
+    for line in output.split("\n"):
+        lower = line.lower()
+        if "error" in lower or "fail" in lower or "exception" in lower:
+            print(red(line))
+        elif "warn" in lower:
+            print(yellow(line))
+        else:
+            print(line)
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+def cmd_config(args):
+    if args and args[0] == "edit":
+        cmd_config_edit()
+        return
+
+    if not os.path.isfile(CONFIG_PATH):
+        print(red(f"Config not found at {CONFIG_PATH}"))
+        sys.exit(1)
+
+    with open(CONFIG_PATH) as f:
+        cfg = json.load(f)
+
+    print(bold("=== Current Configuration ==="))
+    print(f"  {dim(CONFIG_PATH)}\n")
+    print(json.dumps(cfg, indent=2))
+    print()
+
+
+def cmd_config_edit():
+    if os.geteuid() != 0:
+        print(red("Config editing requires sudo: sudo veeder config edit"))
+        sys.exit(1)
+
+    if not os.path.isfile(CONFIG_PATH):
+        print(red(f"Config not found at {CONFIG_PATH}"))
+        sys.exit(1)
+
+    with open(CONFIG_PATH) as f:
+        cfg = json.load(f)
+
+    print(bold("=== Edit Configuration ==="))
+    print(dim("  Press Enter to keep current value, or type a new value.\n"))
+
+    # Server settings
+    print(bold("  Server"))
+    cfg["server"]["host"] = prompt("    Host", cfg["server"].get("host", ""))
+    cfg["server"]["port"] = prompt_int("    Port", cfg["server"].get("port", 10002))
+
+    # Veeder Root settings
+    print()
+    print(bold("  Veeder Root"))
+    conn_type = prompt_choice("    Connection type", ["serial", "tcp"],
+                              cfg["veeder_root"].get("connection", "serial"))
+    cfg["veeder_root"]["connection"] = conn_type
+
+    if conn_type == "serial":
+        cfg["veeder_root"]["serial_port"] = prompt("    Serial port",
+                                                    cfg["veeder_root"].get("serial_port", "/dev/ttyUSB0"))
+        cfg["veeder_root"]["baud_rate"] = prompt_int("    Baud rate",
+                                                      cfg["veeder_root"].get("baud_rate", 9600))
+        cfg["veeder_root"]["parity"] = prompt_choice("    Parity", ["odd", "even", "none"],
+                                                      cfg["veeder_root"].get("parity", "odd"))
+        cfg["veeder_root"]["data_bits"] = prompt_int("    Data bits",
+                                                      cfg["veeder_root"].get("data_bits", 7))
+        cfg["veeder_root"]["stop_bits"] = prompt_int("    Stop bits",
+                                                      cfg["veeder_root"].get("stop_bits", 1))
+    else:
+        cfg["veeder_root"]["host"] = prompt("    Veeder Root host",
+                                             cfg["veeder_root"].get("host", "192.168.1.91"))
+        cfg["veeder_root"]["port"] = prompt_int("    Veeder Root port",
+                                                 cfg["veeder_root"].get("port", 10003))
+
+    # Timeout
+    print()
+    cfg["idle_timeout_seconds"] = prompt_int("  Idle timeout (seconds)",
+                                              cfg.get("idle_timeout_seconds", 30))
+
+    # Confirm
+    print()
+    print(bold("  New configuration:"))
+    print()
+    print(json.dumps(cfg, indent=2))
+    print()
+
+    confirm = input(f"  Save to {CONFIG_PATH}? [y/N] ").strip().lower()
+    if confirm == "y":
+        with open(CONFIG_PATH, "w") as f:
+            json.dump(cfg, f, indent=2)
+            f.write("\n")
+        print(green("  Config saved."))
+    else:
+        print(yellow("  Cancelled, no changes made."))
+
+
+def prompt(label, default):
+    val = input(f"{label} [{default}]: ").strip()
+    return val if val else default
+
+
+def prompt_int(label, default):
+    val = input(f"{label} [{default}]: ").strip()
+    if not val:
+        return default
+    try:
+        return int(val)
+    except ValueError:
+        print(yellow(f"    Invalid number, keeping {default}"))
+        return default
+
+
+def prompt_choice(label, choices, default):
+    choices_str = "/".join(choices)
+    val = input(f"{label} [{default}] ({choices_str}): ").strip().lower()
+    if not val:
+        return default
+    if val in choices:
+        return val
+    print(yellow(f"    Invalid choice, keeping {default}"))
+    return default
+
+
+# ---------------------------------------------------------------------------
+# Test
+# ---------------------------------------------------------------------------
+
+def cmd_test():
+    if os.geteuid() != 0:
+        print(red("Integration tests require sudo: sudo veeder test"))
+        sys.exit(1)
+
+    if not os.path.isfile(INTEGRATION_TEST):
+        print(red(f"Integration test not found at {INTEGRATION_TEST}"))
+        sys.exit(1)
+
+    os.execvp("python3", ["python3", INTEGRATION_TEST])
+
+
+# ---------------------------------------------------------------------------
+# Run
+# ---------------------------------------------------------------------------
+
+def cmd_run():
+    if os.geteuid() != 0:
+        print(red("Running the relay requires sudo: sudo veeder run"))
+        sys.exit(1)
+
+    print("Starting relay...")
+    result = subprocess.run(
+        ["systemctl", "start", f"{SERVICE_NAME}.service"],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        print(red(f"Failed to start: {result.stderr.strip()}"))
+        sys.exit(1)
+
+    print(green("Relay started. Viewing logs:\n"))
+    # Follow the logs for this run
+    subprocess.run(
+        ["journalctl", "-u", SERVICE_NAME, "--no-pager", "-n", "30",
+         "--output=short-precise", "-f"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Help
+# ---------------------------------------------------------------------------
+
+def cmd_help():
+    print(bold("Veeder Relay CLI\n"))
+    print("Usage: veeder <command>\n")
+    print("Commands:")
+    print(f"  {'status':<20} Health check and last run info")
+    print(f"  {'logs':<20} Recent log entries (last 20)")
+    print(f"  {'logs --errors':<20} Only error/warning entries")
+    print(f"  {'logs -n 50':<20} Show last 50 entries")
+    print(f"  {'config':<20} Show current configuration")
+    print(f"  {'config edit':<20} Interactive config editor")
+    print(f"  {'test':<20} Run integration tests")
+    print(f"  {'run':<20} Trigger a relay run now")
+    print()
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main():
+    args = sys.argv[1:]
+
+    if not args or args[0] in ("help", "--help", "-h"):
+        cmd_help()
+    elif args[0] == "status":
+        cmd_status()
+    elif args[0] == "logs" or args[0] == "log":
+        cmd_logs(args[1:])
+    elif args[0] == "config" or args[0] == "cfg":
+        cmd_config(args[1:])
+    elif args[0] == "test":
+        cmd_test()
+    elif args[0] == "run":
+        cmd_run()
+    else:
+        print(red(f"Unknown command: {args[0]}"))
+        print()
+        cmd_help()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
