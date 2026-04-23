@@ -212,8 +212,8 @@ class MockServer:
             time.sleep(0.2)
             conn.sendall(self.command)
 
-            # Read response
-            time.sleep(1)
+            # Read response (wait long enough for serial round-trip)
+            time.sleep(3)
             try:
                 self.received_response = conn.recv(4096)
             except socket.timeout:
@@ -332,13 +332,13 @@ def test_relay_tcp_to_serial():
     def serial_echo():
         try:
             import serial
-            ser = serial.Serial("/tmp/vr-test-device", 9600, timeout=5)
-            while True:
+            ser = serial.Serial("/tmp/vr-test-device", 9600, timeout=0.1)
+            deadline = time.time() + 15
+            while time.time() < deadline:
                 data = ser.read(4096)
                 if data:
                     ser.write(data)
-                else:
-                    break
+                    ser.flush()
             ser.close()
         except Exception:
             pass

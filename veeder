@@ -364,11 +364,12 @@ def cmd_run():
         print(red(f"Failed to start: {result.stderr.strip()}"))
         sys.exit(1)
 
-    print(green("Relay started. Viewing logs:\n"))
-    # Follow the logs for this run
+    # systemctl start blocks until oneshot service completes
+    print(green("Relay finished. Logs:\n"))
+
     subprocess.run(
-        ["journalctl", "-u", SERVICE_NAME, "--no-pager", "-n", "30",
-         "--output=short-precise", "-f"],
+        ["journalctl", "-u", SERVICE_NAME, "--no-pager", "-n", "50",
+         "--output=short-precise"],
     )
 
 
