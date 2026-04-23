@@ -141,6 +141,7 @@ def write_report(data_in, data_out):
     try:
         with open(REPORT_PATH, "w") as f:
             f.write(f"Veeder Relay — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+            f.write(f"--- Device ID ---\n{get_mac_address()}\n\n")
             f.write("--- Data In (Server -> Veeder Root) ---\n")
             f.write(b"".join(data_in).decode("ascii", errors="replace"))
             f.write("\n\n--- Data Out (Veeder Root -> Server) ---\n")
