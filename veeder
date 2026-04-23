@@ -11,6 +11,7 @@ Usage:
     veeder config edit     Interactive config editor
     veeder test            Run integration tests
     veeder run             Trigger a relay run now
+    veeder run --verbose   Run with hex dump of all data
 """
 
 import json
@@ -350,10 +351,17 @@ def cmd_test():
 # Run
 # ---------------------------------------------------------------------------
 
-def cmd_run():
+def cmd_run(args):
     if os.geteuid() != 0:
         print(red("Running the relay requires sudo: sudo veeder run"))
         sys.exit(1)
+
+    verbose = "--verbose" in args or "-v" in args
+
+    if verbose:
+        print("Starting relay (verbose)...\n")
+        result = subprocess.run(["python3", RELAY_SCRIPT, "--verbose"])
+        sys.exit(result.returncode)
 
     print("Starting relay...")
     result = subprocess.run(
@@ -389,6 +397,7 @@ def cmd_help():
     print(f"  {'config edit':<20} Interactive config editor")
     print(f"  {'test':<20} Run integration tests")
     print(f"  {'run':<20} Trigger a relay run now")
+    print(f"  {'run --verbose':<20} Run with hex dump of all data")
     print()
 
 
@@ -410,7 +419,7 @@ def main():
     elif args[0] == "test":
         cmd_test()
     elif args[0] == "run":
-        cmd_run()
+        cmd_run(args[1:])
     else:
         print(red(f"Unknown command: {args[0]}"))
         print()

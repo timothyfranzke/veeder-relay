@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Veeder Root relay — connects a central server to a Veeder Root via serial or TCP."""
 
+import argparse
 import json
 import os
 import select
@@ -9,6 +10,19 @@ import sys
 import uuid
 
 CONFIG_PATH = "/etc/veeder-relay/config.json"
+
+
+def hexdump(data):
+    """Format bytes as a hex+ASCII dump."""
+    lines = []
+    for offset in range(0, len(data), 16):
+        chunk = data[offset:offset + 16]
+        hex_parts = " ".join(f"{b:02x}" for b in chunk[:8])
+        if len(chunk) > 8:
+            hex_parts += "  " + " ".join(f"{b:02x}" for b in chunk[8:])
+        ascii_part = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
+        lines.append(f"  {offset:04x}  {hex_parts:<49s} {ascii_part}")
+    return "\n".join(lines)
 
 
 def get_mac_address():
@@ -68,7 +82,7 @@ def get_fileno(conn):
     return conn.fileno()
 
 
-def relay(server, veeder, idle_timeout):
+def relay(server, veeder, idle_timeout, verbose=False):
     """Pipe data between server and Veeder Root until idle timeout."""
     import serial as serial_mod
 
@@ -93,7 +107,9 @@ def relay(server, veeder, idle_timeout):
                 if not data:
                     print("Server closed connection")
                     return
-                print(f"Server -> Veeder Root: {len(data)} bytes")
+                print(f"Server -> Veeder Root ({len(data)} bytes):")
+                if verbose:
+                    print(hexdump(data))
                 if is_serial:
                     veeder.write(data)
                 else:
@@ -107,7 +123,9 @@ def relay(server, veeder, idle_timeout):
                 if not data:
                     print("Veeder Root closed connection")
                     return
-                print(f"Veeder Root -> Server: {len(data)} bytes")
+                print(f"Veeder Root -> Server ({len(data)} bytes):")
+                if verbose:
+                    print(hexdump(data))
                 server.sendall(data)
 
 
@@ -120,6 +138,11 @@ def close_connection(conn):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Veeder Root relay")
+    parser.add_argument("--verbose", "-v", action="store_true",
+                        help="show hex dump of all relayed data")
+    args = parser.parse_args()
+
     config = load_config()
     idle_timeout = config.get("idle_timeout_seconds", 30)
 
@@ -129,7 +152,7 @@ def main():
     try:
         server = connect_server(config)
         veeder = connect_veeder_root(config)
-        relay(server, veeder, idle_timeout)
+        relay(server, veeder, idle_timeout, verbose=args.verbose)
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
