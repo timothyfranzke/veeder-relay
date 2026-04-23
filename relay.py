@@ -10,6 +10,7 @@ import sys
 import uuid
 
 CONFIG_PATH = "/etc/veeder-relay/config.json"
+REPORT_PATH = "/opt/veeder-relay/last-run.txt"
 
 
 def hexdump(data):
@@ -88,6 +89,8 @@ def relay(server, veeder, idle_timeout, verbose=False):
 
     is_serial = isinstance(veeder, serial_mod.Serial)
     fds = [server.fileno(), veeder.fileno()]
+    data_in = []
+    data_out = []
 
     print(f"Relaying data (idle timeout: {idle_timeout}s)")
     while True:
@@ -95,18 +98,19 @@ def relay(server, veeder, idle_timeout, verbose=False):
 
         if errors:
             print("Connection error detected", file=sys.stderr)
-            return
+            return data_in, data_out
 
         if not readable:
             print("Idle timeout reached, closing connections")
-            return
+            return data_in, data_out
 
         for fd in readable:
             if fd == server.fileno():
                 data = server.recv(4096)
                 if not data:
                     print("Server closed connection")
-                    return
+                    return data_in, data_out
+                data_in.append(data)
                 print(f"Server -> Veeder Root ({len(data)} bytes):")
                 if verbose:
                     print(hexdump(data))
@@ -122,11 +126,29 @@ def relay(server, veeder, idle_timeout, verbose=False):
                     data = veeder.recv(4096)
                 if not data:
                     print("Veeder Root closed connection")
-                    return
+                    return data_in, data_out
+                data_out.append(data)
                 print(f"Veeder Root -> Server ({len(data)} bytes):")
                 if verbose:
                     print(hexdump(data))
                 server.sendall(data)
+
+
+def write_report(data_in, data_out):
+    """Write a report of the last run to disk, overwriting any previous report."""
+    from datetime import datetime
+
+    try:
+        with open(REPORT_PATH, "w") as f:
+            f.write(f"Veeder Relay — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+            f.write("--- Data In (Server -> Veeder Root) ---\n")
+            f.write(b"".join(data_in).decode("ascii", errors="replace"))
+            f.write("\n\n--- Data Out (Veeder Root -> Server) ---\n")
+            f.write(b"".join(data_out).decode("ascii", errors="replace"))
+            f.write("\n")
+        print(f"Report written to {REPORT_PATH}")
+    except Exception as e:
+        print(f"Warning: could not write report: {e}", file=sys.stderr)
 
 
 def close_connection(conn):
@@ -148,11 +170,12 @@ def main():
 
     server = None
     veeder = None
+    data_in, data_out = [], []
 
     try:
         server = connect_server(config)
         veeder = connect_veeder_root(config)
-        relay(server, veeder, idle_timeout, verbose=args.verbose)
+        data_in, data_out = relay(server, veeder, idle_timeout, verbose=args.verbose)
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -161,6 +184,8 @@ def main():
             close_connection(veeder)
         if server:
             close_connection(server)
+
+    write_report(data_in, data_out)
 
     print("Done")
 
